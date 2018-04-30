@@ -1,6 +1,6 @@
 import numpy as np
 import numpy.ma as ma
-import scipy.fftpack as fftpack
+from scipy import fftpack
 from astropy.io import fits
 
 ecf = 1.47e11
@@ -16,6 +16,7 @@ tpixel = pixel*arcsec2rad
 x = 1.0*np.sin(theta)
 y = 1.0*np.cos(theta)
 
+# Fourier space binning
 tet_1grid = np.append((1.2+10**(0.15*np.arange(21.0))), 1200.0)
 nq_1grid = tet_1grid.size
 q_p_minmax = 2.0*np.pi/tet_1grid
@@ -27,34 +28,24 @@ for ik in np.arange(nq_1grid-1) :
 def read_fits_file ( filename, show_hdu_info=False ):
 
     data, hdr = fits.getdata(filename, header = True)
-
-    '''
-    hdul = fits.open(fits_image_filename)
-    hdr = hdul[0].header
-    data = hdul[0].data
-    if show_header :
-        print(repr(hdr))
-    if show_hdu_info :
-        hdul.info()
-    hdul.close()
-    '''
     return hdr, data;
 
 def dist1D(nrows):
     """Returns a 1-D array in which the value of each element is proportional to its frequency.
     """
-    result = np.linspace(-nrows/2+1, nrows/2, nrows)
+    #result = np.linspace(-nrows/2+1, nrows/2, nrows)
+    result = fftpack.fftfreq(nrows, d = 1.0/float(nrows))
+    #result = fftpack.fftshift(result)
     result = np.sqrt(result**2)
     return result
 
-def calc_del_flux (flux, mask, weight_masked) :
+def calc_del_flux (flux, weight) :
 
-    del_flux_masked = ma.masked_array(flux, ~mask, filled_value = 0.0)
-    del_flux_masked = del_flux_masked - del_flux_masked.mean()
-    del_flux_masked *= weight_masked
-    del_flux_masked = del_flux_masked - del_flux_masked.mean()
+    del_flux = flux - flux.mean()
+    del_flux *= weight
+    del_flux = del_flux - del_flux.mean()
 
-    return del_flux_masked
+    return del_flux
 
 def calc_k_w (nx_tot, ny_tot) :
     k_w = np.zeros([nx_tot,ny_tot])
@@ -62,7 +53,7 @@ def calc_k_w (nx_tot, ny_tot) :
     k_y = dist1D(ny_tot)
 
     for i in np.arange(nx_tot) :
-        k_w[:,i] = np.sqrt((k_x[i]/nx_tot)**2.0+(k_y[:]/ny_tot)**2.0)/pixel
+        k_w[i,:] = np.sqrt((k_x[i]/nx_tot)**2.0+(k_y[:]/ny_tot)**2.0)/pixel
 
     return k_w
 
@@ -88,28 +79,33 @@ def auto_power ( flux, fab, t_ch, cmask, f_clip, k_w, outfile = None, writefits 
     mask = (cmask != 0)
 
     weight = np.zeros([nx_tot,ny_tot])
-    weight_masked = ma.masked_array(weight, ~mask, filled_value = 0.0)
+    weight = cmask
+    #weight_masked = ma.masked_array(weight, ~mask, filled_value = 0.0)
 
     #print weight_masked.shape, t_ch.shape
     #t_ch_masked = ma.masked_array(t_ch, ~mask)
     #weight_masked = t_ch_masked / t_ch_masked.mean()
 
-    del_flux_masked = calc_del_flux (flux, mask, weight_masked)
-    del_flux_ab_masked = calc_del_flux (fab, mask, weight_masked)
+    del_flux = calc_del_flux (flux, weight)
+    del_flux_ab = calc_del_flux (fab, weight)
 
     # Remove axis in Fourier Space and compute fft
 
-    msk_fft = np.ones([nx_tot,ny_tot])
-    msk_fft[:,0] = 0.0
-    msk_fft[0,:] = 0.0
-    msk_fft = np.roll(msk_fft,-nx21, axis = 0)
-    msk_fft = np.roll(msk_fft,-ny21, axis = 1)
+    #msk_fft = np.ones([nx_tot,ny_tot])
+    #msk_fft[:,0] = 0.0
+    #msk_fft[0,:] = 0.0
+    #msk_fft = np.roll(msk_fft,-nx21, axis = 0)
+    #msk_fft = np.roll(msk_fft,-ny21, axis = 1)
 
-    del_flux_fft = fftpack.fft2(del_flux_masked)
-    del_flux_ab_fft = fftpack.fft2(del_flux_ab_masked)
+    del_flux_fft = fftpack.fft2(del_flux)
+    del_flux_ab_fft = fftpack.fft2(del_flux_ab)
 
-    amp = np.roll(np.roll(del_flux_fft, -ny21, axis=1), -nx21, axis = 0)
-    ampab = np.roll(np.roll(del_flux_ab_fft, -ny21, axis=1), -nx21, axis = 0)
+    amp = del_flux_fft
+    ampab = del_flux_ab_fft
+    #amp = fftpack.fftshift(del_flux_fft)
+    #ampab= fftpack.fftshift(del_flux_ab_fft)
+    #amp = np.roll(np.roll(del_flux_fft, -ny21, axis=1), -nx21, axis = 0)
+    #ampab = np.roll(np.roll(del_flux_ab_fft, -ny21, axis=1), -nx21, axis = 0)
 
     ###
     pairs = np.zeros(nq_1grid-1)
@@ -120,14 +116,13 @@ def auto_power ( flux, fab, t_ch, cmask, f_clip, k_w, outfile = None, writefits 
     sig_ab = np.zeros(nq_1grid-1)
 
     k_1_minmax = q_p_minmax/2.0/np.pi
-
+ 
     for iq in np.arange(nq_1grid-1) :
-        hp = np.where ((k_w >= k_1_minmax[iq+1] & k_w < k_1_minmax[iq]))
-
+        hp = np.where(((k_w >= k_1_minmax[iq+1]) & (k_w < k_1_minmax[iq])))
         if (len(hp) >1) :
-            power[iq] = mean(abs(amp[hp])**2.0)*area/f_clip
+            power[iq] = np.mean(np.abs(amp[hp])**2.0)*area/f_clip
             pairs[iq] = len(hp)
-            powerab[iq] = mean(abs(ampab[hp])**2.0)*area/f_clip
+            powerab[iq] = np.mean(np.abs(ampab[hp])**2.0)*area/f_clip
 
     sig_p = power/(np.sqrt(0.5*pairs))
     sig_pab = powerab/(np.sqrt(0.5*pairs))
@@ -137,15 +132,13 @@ def auto_power ( flux, fab, t_ch, cmask, f_clip, k_w, outfile = None, writefits 
     sig_plc = np.sqrt(sig_pab**2.0 + sig_p**2.0)
 
     if outfile :
-        for iq in no.arange(nq_1grid-1) :
-            print>>outfile,  2.*np.pi/q_p_1grid[iq], pairs[iq]
+        f = open(outfile,'w')
+        for iq in np.arange(nq_1grid-1) :
+            print>>f,  2.*np.pi/q_p_1grid[iq], pairs[iq]
 
-        outfile.close()
+        f.close()
 
-    if writefits :
-        pyfits.writeto(writefits,amp.real+amp.imag)
-
-    return ( amp, amp_ab, power, power_ab, pclean, sig_plc )
+    return (amp, ampab, power, powerab, pairs, pclean, sig_plc )
 
 def cross_power ( amp1, amp2, power1, power2, f_clip, k_w, writefits = None ) :
 
@@ -193,103 +186,17 @@ def coherence (power_x,pclean1,pclean2,sig_pcl1,sig_pcl2) :
 
     return 0
 
-def main_old():
-    ''' Note: difference between IDL and python
-        IDL: column major order; python: row major order
-    '''
+def plot_ps ( power, k, plotfile=None ) :
 
-    flux1 = read_fits_file ('egs_flu_ch1.fits')
-    fab1  = read_fits_file ('ch1_ab_rep.fits')
-    t_ch1 = read_fits_file ('egs_exp_ch1.fits')
-    mean2 = read_fits_file ('mean_0520_flux.fits')
-
-    flux2 = read_fits_file ('egs_flu_ch2.fits')
-    fab2  = read_fits_file ('ch2_ab_rep.fits')
-    t_ch2 = read_fits_file ('egs_exp_ch2.fits')
-
-    flux4 = read_fits_file ('egs_flu_ch4.fits')
-    fab4  = read_fits_file ('ch4_ab_rep.fits')
-    t_ch4 = read_fits_file ('egs_exp_ch2.fits')
-
-    img = read_fits_file ('flux_rep.fits')
-
-    flux = read_fits_file ('deltaf_0520_new.fits')
-
-    t_x = read_fits_file ('exp_ab_0520.fits')
-
-    cmask = t_ch1 / t_ch1 #;(readfits('mask_rep_corr.fits',hea5));[0:1131,*]
-    cmask = ( cmask == 1.0 ).astype(int)
-    xab = read_fits_file('deltaf_ab_0520.fits')
-
-    print ("The mean flux is %e " % ( np.mean(flux) ))
-
-    pyfits.writeto('cmask_fixex.fits',cmask)
-
-    flux1 *= cmask
-    flux2 *= cmask
-    flux3 *= cmask
-    flux *= cmask/ecf
-    mean2 *= cmask/ecf
-    xab *= cmask/ecf
-
-    fab1 *= cmask
-    fab2 *= cmask
-    fab4 *= cmask
-
-    print ("The mean flux after masking is %e " % ( np.mean(flux) ))
-
-    s_e = flux1.shape
-    nx_tot = s_e[0]
-    ny_tot = s_e[1]
-    nx21 = nx_tot/2+1
-    ny21 = ny_tot/2+1
-
-    flux = flux/(pixel/3600.0)**2.0*3282.8 # from cts/s/pix to cts/s/steradians
-    xab = xab/(pixel/3600.0)**2.0*3282.8
-
-    # Defining binning in Real and Fourier space
-    exp = np.zeros([nx_tot,ny_tot])
-    rx = np.zeros([nx_tot,ny_tot])
-    n_k = 1000
-    nx_center = nx21 -1
-    ny_center = ny21 -1
-
-    k_w = calc_k_w (nx_tot, ny_tot)
-    k_0 = 1.0 / (np.sqrt(2.0) * nx_tot * pixel)
-    k_f = 1.01 * np.max(k_w)
-
-    f_clip = calc_f_clip ( cmask, nx_tot, ny_tot )
-
-    # IR Channel 1
-    (amp_ir1, amp_ab_ir1, power_ir1, power_ab_ir1, pclean_ir1, sig_plc_ir1 ) = auto_power ( flux1, fab1, t_ch1, cmask, f_clip, k_w, outfile = 'pairs_egs.dat', writefits = None )
-
-    # IR Channel 2
-    (amp_ir2, amp_ab_ir2, power_ir2, power_ab_ir2, pclean_ir2, sig_plc_ir2 ) = auto_power ( flux2, fab2, t_ch2, cmask, f_clip, k_w, outfile = None, writefits = None )
-
-    # Channel 12
-    (amp_ir4, amp_ab_ir4, power_ir4, power_ab_ir4, pclean_ir4, sig_plc_ir4 ) = auto_power ( flux4, fab4, t_ch4, cmask, f_clip, k_w, outfile = None, writefits = None )
-
-    # X-ray
-    (amp, amp_ab, power, power_ab, pclean, sig_plc ) = auto_power ( flux, fab, t_x, cmask, f_clip, k_w, outfile = None, writefits = None )
-
-    # cross ch1 and X-ray
-    (power_1x, sig_1x) = cross_power ( amp_ir1, amp, power_ir1, power, f_clip, k_w, writefits = None )
-    # cross ch1 ab and X-ray
-    (power_1xab, sig_1x) = cross_power ( amp_ab_ir1, amp, power_ab_ir1, power, f_clip, k_w, writefits = None )
-
-    # cross ch2 and X-ray
-    (power_2x, sig_2x) = cross_power ( amp_ir2, amp, power_ir2, power, f_clip, k_w, writefits = None )
-    # cross ch2 ab and X-ray
-    (power_2xab, sig_2x) = cross_power ( amp_ab_ir2, amp, power_ab_ir2, power, f_clip, k_w, writefits = None )
-
-    # cross ch4 and X-ray
-    (power_4x, sig_4x) = cross_power ( amp_ir4, amp, power_ir4, power, f_clip, k_w, writefits = None )
-    # cross ch4 ab and X-ray
-    (power_4xab, sig_4x) = cross_power ( amp_ab_ir4, amp, power_ab_ir4, power, f_clip, k_w, writefits = None )
-
-    # Coherence
-
-#def plot_auto_power () :
+    import matplotlib.pyplot as plt
+    plt.loglog(k, power)
+    plt.xlabel(r'$k$')
+    plt.ylabel(r'$P(k)$')
+    
+    if plotfile :
+        plt.savefig(plotfile)
+    else:
+        plt.show()
 
 def main():
     folder = '../Chandra/'
@@ -324,8 +231,8 @@ def main():
     #exp = np.zeros([nx_tot,ny_tot])
     #rx = np.zeros([nx_tot,ny_tot])
     #n_k = 1000
-    nx_center = nx21 -1
-    ny_center = ny21 -1
+    #nx_center = nx21 -1
+    #ny_center = ny21 -1
 
     k_w = calc_k_w (nx_tot, ny_tot)
     k_0 = 1.0 / (np.sqrt(2.0) * nx_tot * pixel)
@@ -333,8 +240,11 @@ def main():
 
     f_clip = calc_f_clip ( cmask, nx_tot, ny_tot )
 
-    (amp, amp_ab, power, power_ab, pclean, sig_plc ) = auto_power ( flux, xab, t_x, cmask, f_clip, k_w, outfile = None, writefits = None )
+    (amp, ampab, power, power_ab, pairs, pclean, sig_plc ) = auto_power ( flux, xab, t_x, cmask, f_clip, k_w, outfile = None, writefits = None )
 
+    k_p_1grid = 2.*np.pi/q_p_1grid
+
+    plot_ps(k_p_1grid, pclean)
 
 if __name__ == "__main__":
     main()
